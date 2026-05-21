@@ -1,82 +1,61 @@
-name: Build Ultimate Hook for macOS
+name: Build iOS Tweak (theos-jailed)
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:  # يدوي
 
 jobs:
   build:
-    runs-on: macos-latest  # macOS latest (Intel or Apple Silicon)
-    
+    runs-on: macos-latest  # macOS مطلوب لأن البناء يحتاج Xcode
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup environment
-      run: |
-        echo "Building on macOS version:"
-        sw_vers
-        echo "Xcode version:"
-        xcodebuild -version
-        echo "Clang version:"
-        clang++ --version
+      - name: Install dependencies (theos, ldid, etc.)
+        run: |
+          # تثبيت homebrew إذا لم يكن موجودًا (macOS runner فيه مسبقًا)
+          brew install ldid
+          brew install dpkg
+          brew install git
 
-    - name: Create build directory
-      run: mkdir -p build
+      - name: Setup theos
+        run: |
+          export THEOS=/opt/theos
+          sudo git clone --depth=1 https://github.com/theos/theos.git $THEOS
+          sudo chown -R $USER $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
 
-    - name: Compile hook library
-      run: make all
+      - name: Setup theos-jailed (for no-jailbreak tweaks)
+        run: |
+          export THEOS_JAILED=1
+          echo "THEOS_JAILED=1" >> $GITHUB_ENV
+          # تحميل مكتبة iOSRE_Framework_Private (مطلوبة لبعض الهوكات)
+          git clone https://github.com/kabiroberai/iOSRE_Framework_Private.git $THEOS/vendor/iOSRE_Framework_Private || true
 
-    - name: Sign library (ad-hoc)
-      run: |
-        # Create temporary entitlements
-        cat > entitlements.plist << EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-            <true/>
-            <key>com.apple.security.cs.disable-library-validation</key>
-            <true/>
-        </dict>
-        </plist>
-        EOF
-        codesign -f -s - --entitlements entitlements.plist ultimate_hook.dylib
-        codesign -vvv ultimate_hook.dylib
+      - name: Build tweak (make package)
+        run: |
+          make package FINALPACKAGE=1
+          # سيتم إنشاء ملف .deb و .ipa في مجلد packages/
 
-    - name: Run basic test
-      run: make test
+      - name: List build artifacts
+        run: |
+          find . -name "*.deb" -o -name "*.ipa" -o -name "*.dylib" | head -20
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ultimate_hook_dylib
-        path: ultimate_hook.dylib
-        retention-days: 30
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tweak-deb
+          path: packages/*.deb
+          retention-days: 30
 
-    - name: Upload debug symbols (optional)
-      uses: actions/upload-artifact@v4
-      with:
-        name: hook_symbols
-        path: |
-          ultimate_hook.dylib
-          build/hook.o
-        retention-days: 7
-
-  # Optional: Test on different macOS versions (using matrix)
-  test-compatibility:
-    runs-on: macos-latest
-    needs: build
-    steps:
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: ultimate_hook_dylib
-    - name: Verify architecture
-      run: |
-        file ultimate_hook.dylib
-        lipo -info ultimate_hook.dylib || true
+      - name: Upload .ipa artifact (if generated)
+        uses: actions/upload-artifact@v4
+        with:
+          name: tweak-ipa
+          path: packages/*.ipa
+          retention-days: 30
