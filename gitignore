@@ -1,0 +1,23 @@
+# Build outputs
+ultimate_hook.dylib
+build/
+*.o
+*.dylib
+*.dSYM/
+test_dlopen
+entitlements.plist
+
+# IDE files
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS system files
+.DS_Store
+*.swp
+*~
+
+# Temporary files
+*.tmp
+*.log
