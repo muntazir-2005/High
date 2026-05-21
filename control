@@ -1,0 +1,6 @@
+Package: com.yourcompany.gameprotector
+Name: GameProtector
+Depends: firmware (>= 15.0), mobilesubstrate
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: An advanced anti-tamper, anti-cheat, and anti-ban system.
