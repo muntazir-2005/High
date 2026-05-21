@@ -1,7 +1,4 @@
-// src/hook.cpp
-// Ultimate Game Protection Hook for macOS
-// Compile: clang++ -dynamiclib -o ultimate_hook.dylib hook.cpp -framework Security -framework CoreFoundation -framework SystemConfiguration -framework ApplicationServices -stdlib=libc++ -O3 -Wall -fvisibility=hidden
-
+// hook.cpp - Fixed for modern macOS SDK (Xcode 16+)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,196 +17,152 @@
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <time.h>
-#include <random>
-#include <vector>
-#include <string>
 
-// ========================== GLOBAL DYNAMIC SIGNATURE DATA ==========================
-static char g_dynamic_signature_identifier[128] = {0};
-static uint8_t g_fake_certificate_data[256] = {0};
+// ========== Dynamic signature (rotates each session) ==========
+static char g_dynamic_sig[128] = {0};
+static uint8_t g_fake_cert[256] = {0};
 static size_t g_fake_cert_size = 0;
-static pthread_once_t g_sig_init_once = PTHREAD_ONCE_INIT;
+static pthread_once_t sig_once = PTHREAD_ONCE_INIT;
 
-static void generate_new_dynamic_signature() {
-    FILE* urandom = fopen("/dev/urandom", "rb");
-    if (urandom) {
-        uint8_t rand_bytes[16];
-        fread(rand_bytes, 1, 16, urandom);
-        fclose(urandom);
-        snprintf(g_dynamic_signature_identifier, sizeof(g_dynamic_signature_identifier),
-                 "com.dynamic.hook.%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                 rand_bytes[0], rand_bytes[1], rand_bytes[2], rand_bytes[3],
-                 rand_bytes[4], rand_bytes[5], rand_bytes[6], rand_bytes[7],
-                 rand_bytes[8], rand_bytes[9], rand_bytes[10], rand_bytes[11],
-                 rand_bytes[12], rand_bytes[13], rand_bytes[14], rand_bytes[15]);
+static void gen_new_sig() {
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (f) {
+        uint8_t r[16];
+        fread(r, 1, 16, f);
+        fclose(f);
+        snprintf(g_dynamic_sig, sizeof(g_dynamic_sig),
+                 "com.dyn.hook.%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                 r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],r[8],r[9],r[10],r[11],r[12],r[13],r[14],r[15]);
     } else {
-        snprintf(g_dynamic_signature_identifier, sizeof(g_dynamic_signature_identifier), "dynamic.hook.%ld", time(NULL));
+        snprintf(g_dynamic_sig, sizeof(g_dynamic_sig), "dyn.%ld", time(NULL));
     }
-    size_t cert_len = 128 + (rand() % 128);
-    if (cert_len > sizeof(g_fake_certificate_data)) cert_len = sizeof(g_fake_certificate_data);
-    g_fake_cert_size = cert_len;
-    for (size_t i = 0; i < cert_len; i++) {
-        g_fake_certificate_data[i] = rand() % 256;
-    }
-    fprintf(stderr, "[HOOK] New dynamic signature generated: %s\n", g_dynamic_signature_identifier);
+    g_fake_cert_size = 128 + (rand() % 128);
+    for (size_t i=0; i<g_fake_cert_size; i++) g_fake_cert[i] = rand() % 256;
+    fprintf(stderr, "[HOOK] New signature: %s\n", g_dynamic_sig);
 }
 
-static void init_dynamic_signature() {
-    srand((unsigned)time(NULL));
-    generate_new_dynamic_signature();
-}
+static void init_sig() { srand((unsigned)time(NULL)); gen_new_sig(); }
 
-extern "C" void rotate_hook_signature(void) {
-    fprintf(stderr, "[HOOK] Signature rotation triggered.\n");
-    generate_new_dynamic_signature();
-}
+extern "C" void rotate_hook_signature(void) { gen_new_sig(); }
 
-// ========================== HOOKED SECURITY FUNCTIONS ==========================
+// ========== HOOKED FUNCTIONS ==========
 extern "C" {
 
-OSStatus SecStaticCodeCheckValidity(SecStaticCodeRef code, SecCSFlags flags, SecRequirementRef requirement) {
-    fprintf(stderr, "[HOOK] SecStaticCodeCheckValidity called - returning success.\n");
+OSStatus SecStaticCodeCheckValidity(SecStaticCodeRef c, SecCSFlags f, SecRequirementRef r) {
+    fprintf(stderr, "[HOOK] SecStaticCodeCheckValidity -> ok\n");
     return errSecSuccess;
 }
 
-OSStatus SecCodeCopySigningInformation(SecStaticCodeRef code, SecCSFlags flags, CFDictionaryRef *info) {
-    fprintf(stderr, "[HOOK] SecCodeCopySigningInformation - creating fake dynamic info.\n");
-    pthread_once(&g_sig_init_once, init_dynamic_signature);
-    
-    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+OSStatus SecCodeCopySigningInformation(SecStaticCodeRef c, SecCSFlags f, CFDictionaryRef *info) {
+    fprintf(stderr, "[HOOK] SecCodeCopySigningInformation -> fake data\n");
+    pthread_once(&sig_once, init_sig);
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
     if (!dict) return errSecInternalError;
-    
-    CFStringRef identifier = CFStringCreateWithCString(kCFAllocatorDefault, g_dynamic_signature_identifier, kCFStringEncodingUTF8);
-    CFDictionarySetValue(dict, kSecCodeInfoIdentifier, identifier);
-    CFRelease(identifier);
-    
-    char team_id[32];
-    snprintf(team_id, sizeof(team_id), "TEAM%06X", rand() & 0xFFFFFF);
-    CFStringRef team = CFStringCreateWithCString(kCFAllocatorDefault, team_id, kCFStringEncodingUTF8);
-    CFDictionarySetValue(dict, kSecCodeInfoTeamIdentifier, team);
-    CFRelease(team);
-    
-    CFDataRef certData = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, g_fake_certificate_data, g_fake_cert_size, kCFAllocatorNull);
+    CFStringRef ident = CFStringCreateWithCString(NULL, g_dynamic_sig, kCFStringEncodingUTF8);
+    CFDictionarySetValue(dict, kSecCodeInfoIdentifier, ident);
+    CFRelease(ident);
+    char team[32]; snprintf(team, sizeof(team), "TEAM%06X", rand()&0xFFFFFF);
+    CFStringRef teamstr = CFStringCreateWithCString(NULL, team, kCFStringEncodingUTF8);
+    CFDictionarySetValue(dict, kSecCodeInfoTeamIdentifier, teamstr);
+    CFRelease(teamstr);
+    CFDataRef certData = CFDataCreate(NULL, g_fake_cert, g_fake_cert_size);
     if (certData) {
-        CFArrayRef certChain = CFArrayCreate(kCFAllocatorDefault, (const void**)&certData, 1, &kCFTypeArrayCallBacks);
-        if (certChain) {
-            CFDictionarySetValue(dict, kSecCodeInfoCertificates, certChain);
-            CFRelease(certChain);
-        }
+        CFArrayRef chain = CFArrayCreate(NULL, (const void**)&certData, 1, NULL);
+        if (chain) { CFDictionarySetValue(dict, kSecCodeInfoCertificates, chain); CFRelease(chain); }
         CFRelease(certData);
     }
-    
-    CFNumberRef format = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, (int[]){kSecCodeFormatMagic});
-    CFDictionarySetValue(dict, kSecCodeInfoFormat, format);
-    CFRelease(format);
-    
     *info = dict;
     return errSecSuccess;
 }
 
-OSStatus SecCodeCheckValidity(SecCodeRef code, SecCSFlags flags, SecRequirementRef requirement) {
-    fprintf(stderr, "[HOOK] SecCodeCheckValidity called - returning success.\n");
+OSStatus SecCodeCheckValidity(SecCodeRef c, SecCSFlags f, SecRequirementRef r) {
+    fprintf(stderr, "[HOOK] SecCodeCheckValidity -> ok\n");
     return errSecSuccess;
 }
 
-SecStaticCodeRef g_fake_static_code = (SecStaticCodeRef)0xDEADBEEF;
-OSStatus SecStaticCodeCreateWithPath(CFURLRef path, SecCSFlags flags, SecStaticCodeRef *code) {
-    fprintf(stderr, "[HOOK] SecStaticCodeCreateWithPath returning fake code object.\n");
-    *code = g_fake_static_code;
+OSStatus SecStaticCodeCreateWithPath(CFURLRef p, SecCSFlags f, SecStaticCodeRef *c) {
+    fprintf(stderr, "[HOOK] SecStaticCodeCreateWithPath -> fake\n");
+    static SecStaticCodeRef fake = (SecStaticCodeRef)0xDEADBEEF;
+    *c = fake;
     return errSecSuccess;
 }
 
-void _exit(int status) {
-    fprintf(stderr, "[HOOK] _exit(%d) blocked.\n", status);
-    while (1) { pause(); }
+void _exit(int status) { fprintf(stderr, "[HOOK] _exit(%d) blocked\n"); while(1) pause(); }
+int _kill(pid_t pid, int sig) { fprintf(stderr, "[HOOK] kill(%d,%d) blocked\n", pid, sig); return 0; }
+
+// Correct signature for __assert_rtn in modern macOS SDK
+void __assert_rtn(const char *func, const char *file, int line, const char *expr) {
+    fprintf(stderr, "[HOOK] assert ignored at %s:%d in %s: %s\n", file, line, func, expr);
 }
 
-int _kill(pid_t pid, int sig) {
-    fprintf(stderr, "[HOOK] kill(%d,%d) blocked.\n", pid, sig);
-    return 0;
-}
+void __stack_chk_fail(void) { fprintf(stderr, "[HOOK] stack_chk_fail ignored\n"); }
 
-void __assert_rtn(const char *file, int line, const char *func, const char *expr) {
-    fprintf(stderr, "[HOOK] assert ignored at %s:%d\n", file, line);
-}
-
-void __stack_chk_fail(void) {
-    fprintf(stderr, "[HOOK] stack_chk_fail ignored\n");
-}
-
-long syscall(long number, ...) {
-    long forbidden[] = { 26, 31, 0 };
+// syscall returns int, not long
+int syscall(int number, ...) {
+    int forbidden[] = { 26, 31, 0 };
     for (int i = 0; forbidden[i]; ++i) {
         if (number == forbidden[i]) {
-            fprintf(stderr, "[HOOK] syscall(%ld) blocked\n", number);
+            fprintf(stderr, "[HOOK] syscall(%d) blocked\n", number);
             return 0;
         }
     }
-    auto original = (long(*)(long,...))dlsym(RTLD_NEXT, "syscall");
-    return original ? original(number, (va_list)0) : -1;
+    auto original = (int(*)(int,...))dlsym(RTLD_NEXT, "syscall");
+    if (original) return original(number, (va_list)0);
+    errno = ENOSYS;
+    return -1;
 }
 
 int ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    fprintf(stderr, "[HOOK] ptrace() blocked\n");
+    fprintf(stderr, "[HOOK] ptrace blocked\n");
     return 0;
 }
 
 int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (namelen >= 4 && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
-        if (oldp && oldlenp) *(int*)oldp = 0, *oldlenp = sizeof(int);
+        if (oldp && oldlenp) { *(int*)oldp = 0; *oldlenp = sizeof(int); }
         return 0;
     }
     auto original = (int(*)(int*,u_int,void*,size_t*,void*,size_t))dlsym(RTLD_NEXT, "sysctl");
     return original ? original(name, namelen, oldp, oldlenp, newp, newlen) : -1;
 }
 
-int __cxa_guard_acquire(void *guard) {
-    *(volatile int*)guard = 1;
-    return 1;
-}
-void __cxa_guard_release(void *guard) { }
-void __cxa_guard_abort(void *guard) { }
-
-void __cxa_throw(void *obj, void *tinfo, void (*dest)(void*)) {
-    if (dest) dest(obj);
-    fprintf(stderr, "[HOOK] __cxa_throw blocked\n");
-}
+int __cxa_guard_acquire(void *g) { *(volatile int*)g = 1; return 1; }
+void __cxa_guard_release(void *g) {}
+void __cxa_guard_abort(void *g) {}
+void __cxa_throw(void *obj, void *tinfo, void (*dest)(void*)) { if (dest) dest(obj); fprintf(stderr, "[HOOK] __cxa_throw blocked\n"); }
 void* __cxa_begin_catch(void *exc) { return exc; }
-void __cxa_end_catch(void) { }
+void __cxa_end_catch(void) {}
 void __cxa_pure_virtual(void) { fprintf(stderr, "[HOOK] pure virtual ignored\n"); }
-void __cxa_atexit(void (*func)(void*), void *arg, void *dso) { }
+void __cxa_atexit(void (*func)(void*), void *arg, void *dso) {}
 
-char* getenv(const char* name) {
-    if (name && strcmp(name, "DYLD_INSERT_LIBRARIES") == 0) return nullptr;
+char* getenv(const char *name) {
+    if (name && strcmp(name, "DYLD_INSERT_LIBRARIES")==0) return NULL;
     auto original = (char*(*)(const char*))dlsym(RTLD_NEXT, "getenv");
-    return original ? original(name) : nullptr;
+    return original ? original(name) : NULL;
 }
-
-const char* dyld_get_image_name(uint32_t index) {
+const char* dyld_get_image_name(uint32_t idx) {
     auto original = (const char*(*)(uint32_t))dlsym(RTLD_NEXT, "dyld_get_image_name");
-    const char* name = original ? original(index) : nullptr;
-    if (name && strstr(name, "ultimate_hook.dylib")) return "";
-    return name;
+    const char *n = original ? original(idx) : NULL;
+    if (n && strstr(n, "ultimate_hook.dylib")) return "";
+    return n;
 }
 
 FILE* fopen(const char *path, const char *mode) {
-    if (path && (strstr(path, "/proc/") || strstr(path, "/tmp/debug"))) return nullptr;
+    if (path && (strstr(path, "/proc/") || strstr(path, "/tmp/debug"))) return NULL;
     auto original = (FILE*(*)(const char*,const char*))dlsym(RTLD_NEXT, "fopen");
-    return original ? original(path, mode) : nullptr;
+    return original ? original(path, mode) : NULL;
 }
-
 int open(const char *path, int flags, ...) {
-    if (path && (strstr(path, "/proc/") || strstr(path, "/dev/tty"))) {
-        errno = EACCES;
-        return -1;
-    }
+    if (path && (strstr(path, "/proc/") || strstr(path, "/dev/tty"))) { errno = EACCES; return -1; }
     auto original = (int(*)(const char*,int,...))dlsym(RTLD_NEXT, "open");
     return original ? original(path, flags) : -1;
 }
 
-sighandler_t signal(int sig, sighandler_t handler) {
-    if (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS) return SIG_IGN;
-    auto original = (sighandler_t(*)(int,sighandler_t))dlsym(RTLD_NEXT, "signal");
+// Use correct signal handler type
+typedef void (*sig_t)(int);
+sig_t signal(int sig, sig_t handler) {
+    if (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS) return (sig_t)SIG_IGN;
+    auto original = (sig_t(*)(int, sig_t))dlsym(RTLD_NEXT, "signal");
     return original ? original(sig, handler) : SIG_ERR;
 }
 
@@ -218,8 +171,7 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
         const struct sockaddr_in *in_addr = (const struct sockaddr_in *)addr;
         if ((ntohl(in_addr->sin_addr.s_addr) & 0xFF000000) == 0x7F000000) {
             fprintf(stderr, "[HOOK] connect to localhost blocked\n");
-            errno = EACCES;
-            return -1;
+            errno = EACCES; return -1;
         }
     }
     auto original = (int(*)(int,const struct sockaddr*,socklen_t))dlsym(RTLD_NEXT, "connect");
@@ -228,10 +180,10 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
 } // extern "C"
 
-// ========================== INITIALIZATION ==========================
+// ========== Constructor ==========
 __attribute__((constructor))
-static void init_hook() {
-    pthread_once(&g_sig_init_once, init_dynamic_signature);
+static void init() {
+    pthread_once(&sig_once, init_sig);
     unsetenv("DYLD_INSERT_LIBRARIES");
-    fprintf(stderr, "[+] ULTIMATE HOOK LOADED (all protections active)\n");
+    fprintf(stderr, "[+] Ultimate Hook loaded (all protections active)\n");
 }
